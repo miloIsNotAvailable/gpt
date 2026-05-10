@@ -305,7 +305,7 @@ optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
 
 crossentropy = torch.nn.CrossEntropyLoss( ignore_index=2 )
 
-for epoch in range( 25 ):
+for epoch in range( 1 ):
 
     running_loss = 0.
     last_loss = 0.
