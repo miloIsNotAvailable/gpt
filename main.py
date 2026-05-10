@@ -211,7 +211,7 @@ class Decoder( Module ):
 
         out = self.causal( x )
 
-        out = self.cross( out, out )
+        # out = self.cross( out, out )
 
         out = self.feed( out )
 
