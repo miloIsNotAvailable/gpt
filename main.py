@@ -63,7 +63,7 @@ dataset = TextDataset( "./out11.csv" )
 
 loader = DataLoader(
     dataset,
-    batch_size=4
+    batch_size=2
 
 )
 
@@ -215,8 +215,8 @@ class Decoder( Module ):
 
         out = self.feed( out )
 
+        # x = self.norm1( out )
         x = x + out
-        # out = self.norm1( out )
         # x = self.norm2( x )
         # x = self.dropout( x )  
         
@@ -297,15 +297,17 @@ def generate( context ):
     return tokenizer.decode( context )
 
 
-# gpt.train()
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# gpt = gpt.to(device)
+# gpt.load_state_dict(torch.load("gpt.pt"))
+
+gpt.train()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gpt = gpt.to(device)
 
 optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
 
 crossentropy = torch.nn.CrossEntropyLoss( ignore_index=2 )
 
-for epoch in range( 1 ):
+for epoch in range( 25 ):
 
     running_loss = 0.
     last_loss = 0.
@@ -313,10 +315,10 @@ for epoch in range( 1 ):
     for i, data in enumerate(loader):
         
         x, mask = data
+                
+        x = x.to(device)
+        mask = mask.to(device)
         
-        # x.to( device )
-        # mask.to( device )
-
         train = x[:, :-1]
         test = x[:, 1:]
 
@@ -350,7 +352,8 @@ for epoch in range( 1 ):
 
 tokens = tokenizer.encode("W niedzielę Komenda Miejska Policji")
 context = tensor([tokens], dtype=long)
+context = context.to( device )
 
 print( generate( context ) )
 
-torch.save(gpt.state_dict(), "gpt.pt")
+# torch.save(gpt.state_dict(), "gpt.pt")
