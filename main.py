@@ -40,24 +40,32 @@ class TextDataset(IterableDataset):
                 add_special_tokens=True
             )["input_ids"]
 
-            for i in range(0, len(tokens), self.block_size):
+            # for i in range(0, len(tokens), self.block_size):
 
-                chunk = tokens[i:i + self.block_size]
+            #     chunk = tokens[i:i + self.block_size]
 
-                mask = [1] * len( chunk )
+            #     mask = [1] * len( chunk )
 
-                if len(chunk) < self.block_size:
+            #     if len(chunk) < self.block_size:
                     
-                    pad_len = self.block_size - len(chunk)
+            #         pad_len = self.block_size - len(chunk)
 
-                    chunk += [tokenizer.eos_token_id] * pad_len
+            #         chunk += [tokenizer.eos_token_id] * pad_len
                     
-                    mask += [0] * pad_len
+            #         mask += [0] * pad_len
 
-                yield (
-                    tensor(chunk, dtype=long),
-                    tensor(mask, dtype=long)
-                )
+            #     yield (
+            #         tensor(chunk, dtype=long),
+            #         tensor(mask, dtype=long)
+            #     )
+
+            l = len( tokens )
+            tokens = tensor(tokens, dtype=long)
+            tokens = torch.cat( [ tokens, torch.full( (max_seq_length - l,), 2 ) ] )
+
+            # print( tokens.shape )
+
+            yield tokens
 
 dataset = TextDataset( "./out11.csv" )
 
@@ -314,15 +322,17 @@ for epoch in range( 25 ):
     print( f"epoch {epoch}", flush=True )
     for i, data in enumerate(loader):
         
-        x, mask = data
+        x = data
                 
+        # print( x )
+
         x = x.to(device)
-        mask = mask.to(device)
+        # mask = mask.to(device)
         
         train = x[:, :-1]
         test = x[:, 1:]
 
-        optimizer.zero_grad()
+        optimizer.zero_grad( set_to_none=True )
         
         # print( train[0], test[0] )
 
@@ -338,15 +348,15 @@ for epoch in range( 25 ):
 
         optimizer.step()
 
-        running_loss += loss.item()
-        # if i % 4 == 0:
-        last_loss = running_loss
-        print(f'  batch {i + 1} loss: {last_loss}', flush=True)
+        if i % 5 == 0:
+            running_loss += loss.item()
+            last_loss = running_loss
+            print(f'  batch {i + 1} loss: {last_loss}', flush=True)
 
         # tb_x = epoch * len(loader) + i + 1
         # tb_writer.add_scalar('Loss/train', last_loss, tb_x)
         # print( last_loss, tb_x )
-        running_loss = 0.
+        # running_loss = 0.
             
         # break
 
