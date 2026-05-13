@@ -3,9 +3,10 @@ from torch import zeros, arange, exp, sin, cos, triu, tensor, full, __version__,
 from torch.nn import Module, Embedding, MultiheadAttention, LayerNorm, Linear, ReLU, Dropout, ModuleList, CrossEntropyLoss
 from math import sqrt, log
 import pandas
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import IterableDataset, DataLoader, Dataset
 from transformers import AutoTokenizer
-import sys
+import csv
+from itertools import islice
 
 # print(f"GPU: {torch.cuda.is_available()}")
 
@@ -20,69 +21,128 @@ import sys
 #     print(tokenizer( line ))
 
 tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base")
+
+# special_tokens = {
+#     "bos_token": "[START]",
+#     "eos_token": "[END]",
+#     "pad_token": "[PAD]"
+# }
+
+# tokenizer.add_special_tokens(special_tokens)
+
 tokenizer.pad_token = tokenizer.eos_token
 
-class TextDataset(IterableDataset):
+# class TextDataset(IterableDataset):
+
+#     def __init__(self, filename, block_size=128):
+#         self.filename = filename
+#         # self.block_size = block_size
+#         self.df = pandas.read_csv(self.filename)
+#         self.tokens = [ tokenizer(t, add_special_tokens=True)["input_ids"]
+#                         for t in self.df["lead"].dropna()[:10] ]
+        
+#         # self.tokens =tokens
+
+#         for idx in range(len(self.tokens)):
+#             tokens = self.tokens[idx]
+            
+#             l = len( tokens )
+#             tokens = tensor(tokens, dtype=long)
+#             tokens = torch.cat( [ tokens, torch.full( (block_size - l,), 2 ) ] )
+
+#             self.tokens[idx]=tokens
+
+#     def __len__( self ):
+#         return len( self.tokens )
+
+#     # def __getitem__(self, idx):
+
+#     #     tokens = self.tokens[idx]
+        
+#     #     # l = len( tokens )
+#     #     # tokens = tensor(tokens, dtype=long)
+#     #     # tokens = torch.cat( [ tokens, torch.full( (max_seq_length - l,), 2 ) ] )
+
+#     #     # print( tokens.shape )
+
+#     #     return tokens
+
+#     def parse_file( self ):
+#         with open( self.filename, encoding="utf-8" ) as f:
+#             reader = csv.DictReader( f )
+
+#             for row in islice(reader, 10):
+#                 text = row["lead"]
+
+#                 yield text
+
+
+#     def __iter__(self):
+
+#         for line in self.parse_file():
+
+#             text = str(line).strip()
+
+#             tokens = tokenizer(
+#                 text,
+#                 add_special_tokens=True
+#             )["input_ids"]
+
+#             l = len( tokens )
+#             tokens = tensor(tokens, dtype=long)
+#             tokens = torch.cat( [ tokens, torch.full( (max_seq_length - l,), 2 ) ] )
+
+#             # print( tokens.shape )
+
+#             yield tokens
+
+class TextDataset(Dataset):
 
     def __init__(self, filename, block_size=128):
-        self.filename = filename
+        self.df = pandas.read_csv(filename)
+        # self.tokens = [ tokenizer(t, add_special_tokens=True)["input_ids"]
+        #                 for t in self.df["lead"].dropna()[:10] ]
         self.block_size = block_size
-        self.df = pandas.read_csv(self.filename)
 
-    def __iter__(self):
+    def __len__( self ):
+        return 10
 
-        for line in self.df["lead"].dropna()[:10]:
+    def __getitem__( self, idx ):
 
-            text = str(line).strip()
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
 
-            tokens = tokenizer(
-                text,
-                add_special_tokens=True
-            )["input_ids"]
+        lead = self.df.iloc[idx % 10, 2] 
 
-            # for i in range(0, len(tokens), self.block_size):
+        tokens = tokenizer(lead, add_special_tokens=True, max_length=self.block_size)["input_ids"]
 
-            #     chunk = tokens[i:i + self.block_size]
+        l = len( tokens )
 
-            #     mask = [1] * len( chunk )
+        tokens = tensor(tokens, dtype=long)
+        tokens = torch.cat( [ tokens, torch.full( (self.block_size - l,), 2 ) ] )
 
-            #     if len(chunk) < self.block_size:
-                    
-            #         pad_len = self.block_size - len(chunk)
+        return tokens
 
-            #         chunk += [tokenizer.eos_token_id] * pad_len
-                    
-            #         mask += [0] * pad_len
+# df = pandas.read_csv( "out11.csv" )
 
-            #     yield (
-            #         tensor(chunk, dtype=long),
-            #         tensor(mask, dtype=long)
-            #     )
+# tokens = [ tokenizer(t, add_special_tokens=True)["input_ids"]
+#     for t in df["lead"].dropna()[:10] ]
 
-            l = len( tokens )
-            tokens = tensor(tokens, dtype=long)
-            tokens = torch.cat( [ tokens, torch.full( (max_seq_length - l,), 2 ) ] )
+max_seq_length = 64
 
-            # print( tokens.shape )
-
-            yield tokens
-
-dataset = TextDataset( "./out11.csv" )
+dataset = TextDataset( filename="./out11.csv", block_size=max_seq_length )
 
 loader = DataLoader(
     dataset,
-    batch_size=2
-
+    batch_size=4,
+    shuffle=True
 )
 
-# for batch in loader:
-#     input_ids, mask = batch
-
-#     print(input_ids.shape)
-#     print(mask.shape)
-
-#     print(input_ids.dtype)
-#     break
+for i, batch in enumerate(loader):
+    # input_ids = batch
+    print(tokenizer.decode( batch[0] ), batch.shape)
+    if i == 3:
+        break
 
 class InputEmbeddings(Module):
     def __init__( self, vocab_size: int, d_model: int ):
@@ -113,8 +173,7 @@ class PositionalEncoding(Module):
             return x + self.pe[:, :x.size(1)]
 
 vocab_size = tokenizer.vocab_size
-d_model = 512
-max_seq_length = 128
+d_model = 256
 
 # embedding_layer = InputEmbeddings(vocab_size, d_model)
 # input_tokens, mask = next(iter(loader))
@@ -141,11 +200,12 @@ class CausalSelfAttention( Module ):
             diagonal=1
         )
 
-        out, attn_weights = self.mha( query=x, 
-                                        key=x, 
-                                        value=x, 
-                                        attn_mask=attn_mask,
-                                        is_causal=True )
+        out, _ = self.mha(  query=x, 
+                            key=x, 
+                            value=x, 
+                            attn_mask=attn_mask,
+                            is_causal=True,
+                            need_weights=False )
         
         out = x + out
         out = self.norm( out )
@@ -204,16 +264,11 @@ class Decoder( Module ):
                                            d_model=d_model,
                                            seq_len=seq_len,
                                            dropout_rate=dropout_rate )
-        
-        self.cross = CrossSelfAttention( num_heads=num_heads, 
-                                         d_model=d_model,
-                                         seq_len=seq_len,
-                                         dropout_rate=dropout_rate )
-        
+
         self.feed = FeedForward( d_model=d_model, d_ff=d_ff )
         self.dropout = Dropout( dropout_rate ) 
         self.norm1 = LayerNorm( d_model )
-        self.norm2 = LayerNorm( d_model )
+        # self.norm2 = LayerNorm( d_model )
 
     def forward( self, x ):
 
@@ -221,12 +276,12 @@ class Decoder( Module ):
 
         # out = self.cross( out, out )
 
+        # out = self.norm1( out )
         out = self.feed( out )
 
-        # x = self.norm1( out )
         x = x + out
-        # x = self.norm2( x )
-        # x = self.dropout( x )  
+        x = self.norm1( x )
+        x = self.dropout( x )  
         
         return x
 
@@ -274,12 +329,12 @@ class GPT( Module ):
 #                    dropout_rate=.1 ) 
 
 # decoder( input_tokens )
-input_tokens, mask = next(iter(loader))
-gpt = GPT( num_heads=2,
+# input_tokens, mask = next(iter(loader))
+gpt = GPT( num_heads=1,
            d_model=d_model,
            seq_len=max_seq_length,
            vocab_size=vocab_size,
-           d_ff=2048,
+           d_ff=1024,
            dropout_rate=.1,
            n_layers=6 )
 
@@ -288,7 +343,7 @@ gpt = GPT( num_heads=2,
 
 def generate( context ):
 
-    for i in range( max_seq_length ):
+    for i in range( 128 ):
         out = gpt( context[ :, -max_seq_length: ] )
         out = out[:, -1, :] 
         out = softmax( input=out, dim=-1 )
@@ -299,6 +354,9 @@ def generate( context ):
         # print( out )
 
         context = cat([context, out], dim=1)
+
+        if out == tokenizer.eos_token:
+            break
 
     context = context[ 0 ]
     context = context[ context != 2 ]
@@ -315,7 +373,7 @@ optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
 
 crossentropy = torch.nn.CrossEntropyLoss( ignore_index=2 )
 
-for epoch in range( 25 ):
+for epoch in range( 20 ):
 
     running_loss = 0.
     last_loss = 0.
@@ -348,7 +406,7 @@ for epoch in range( 25 ):
 
         optimizer.step()
 
-        if i % 5 == 0:
+        if i % 4 == 3:
             running_loss += loss.item()
             last_loss = running_loss
             print(f'  batch {i + 1} loss: {last_loss}', flush=True)
