@@ -7,6 +7,8 @@ from torch.utils.data import IterableDataset, DataLoader, Dataset
 from transformers import AutoTokenizer
 import csv
 from itertools import islice
+# from torch.nn.attention import and_masks, flex_attention
+
 
 # print(f"GPU: {torch.cuda.is_available()}")
 
@@ -30,7 +32,8 @@ tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base")
 
 # tokenizer.add_special_tokens(special_tokens)
 
-tokenizer.pad_token = tokenizer.eos_token
+# tokenizer.pad_token = tokenizer.eos_token
+# print( tokenizer.pad_token_id, tokenizer.eos_token_id )
 
 # class TextDataset(IterableDataset):
 
@@ -105,21 +108,21 @@ class TextDataset(Dataset):
         self.block_size = block_size
 
     def __len__( self ):
-        return 10
+        return 50
 
     def __getitem__( self, idx ):
 
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        lead = self.df.iloc[idx % 10, 2] 
+        lead = self.df.iloc[idx % 50, 2] 
 
         tokens = tokenizer(lead, add_special_tokens=True, max_length=self.block_size)["input_ids"]
 
         l = len( tokens )
 
         tokens = tensor(tokens, dtype=long)
-        tokens = torch.cat( [ tokens, torch.full( (self.block_size - l,), 2 ) ] )
+        tokens = torch.cat( [ tokens, torch.full( (self.block_size - l,), tokenizer.pad_token_id ) ] )
 
         return tokens
 
@@ -182,6 +185,24 @@ d_model = 256
 
 # pos_encoding_layer = PositionalEncoding(d_model, max_seq_length)
 # position_encoded_tokens = pos_encoding_layer(embedded_tokens)
+
+# SLIDING_WINDOW = 1024
+# def sliding_window_causal(b, h, q_idx, kv_idx):
+#     causal_mask = q_idx >= kv_idx
+#     window_mask = q_idx - kv_idx <= SLIDING_WINDOW 
+#     return causal_mask & window_mask
+
+# def sliding_window(b, h, q_idx, kv_idx):
+#     return q_idx - kv_idx <= SLIDING_WINDOW
+
+# class FlexAttention( Module ):
+#     def __init__( self, q, k, v ):
+#         self.q = q
+#         self.k = k
+#         self.v = v
+    
+#     def forward( self, x ):
+
 
 class CausalSelfAttention( Module ):
     def __init__( self, num_heads, d_model, seq_len, dropout_rate=0.1 ):
@@ -355,7 +376,7 @@ def generate( context ):
 
         context = cat([context, out], dim=1)
 
-        if out == tokenizer.eos_token:
+        if out == tokenizer.eos_token_id:
             break
 
     context = context[ 0 ]
@@ -365,30 +386,39 @@ def generate( context ):
 
 # gpt.load_state_dict(torch.load("gpt.pt"))
 
-gpt.train()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gpt = gpt.to(device)
 
 optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
 
-crossentropy = torch.nn.CrossEntropyLoss( ignore_index=2 )
+crossentropy = torch.nn.CrossEntropyLoss( ignore_index=tokenizer.pad_token_id )
 
-for epoch in range( 20 ):
+accumulation_steps = 3
+num_epochs = 100
+
+for epoch in range( num_epochs ):
+
+    gpt.train()
 
     running_loss = 0.
     last_loss = 0.
     print( f"epoch {epoch}", flush=True )
+    
+    optimizer.zero_grad()
+
     for i, data in enumerate(loader):
         
         x = data
                 
         # print( x )
 
-        x = x.to(device)
+        # x = x.to(device)
         # mask = mask.to(device)
         
         train = x[:, :-1]
         test = x[:, 1:]
+
+        train, test = train.to(device), test.to(device)
 
         optimizer.zero_grad( set_to_none=True )
         
@@ -401,15 +431,21 @@ for epoch in range( 20 ):
 
         loss = crossentropy( logits, test )
         loss.backward()
+        
+        optimizer.step()
 
         # print( loss.item() )
 
-        optimizer.step()
+        if (i + 1) % accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
 
-        if i % 4 == 3:
-            running_loss += loss.item()
-            last_loss = running_loss
-            print(f'  batch {i + 1} loss: {last_loss}', flush=True)
+    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
+
+        # if i % 4 == 1:
+        #     running_loss += loss.item()
+        #     last_loss = running_loss
+        #     print(f'  batch {i + 1} loss: {last_loss}', flush=True)
 
         # tb_x = epoch * len(loader) + i + 1
         # tb_writer.add_scalar('Loss/train', last_loss, tb_x)
