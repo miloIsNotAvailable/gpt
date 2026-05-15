@@ -1,104 +1,17 @@
 import torch
-from torch import zeros, arange, exp, sin, cos, triu, tensor, full, __version__, long, softmax, argmax, cat
-from torch.nn import Module, Embedding, MultiheadAttention, LayerNorm, Linear, ReLU, Dropout, ModuleList, CrossEntropyLoss
+# from torch import zeros, arange, exp, sin, cos, triu, tensor, full, __version__, long, softmax, argmax, cat
+from torch.nn import Module, Embedding, LayerNorm, Linear, ReLU, Dropout, ModuleList
 from math import sqrt, log
 import pandas
-from torch.utils.data import IterableDataset, DataLoader, Dataset
-from transformers import AutoTokenizer
-import csv
-from itertools import islice
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer, Adafactor
+# import csv
+# from itertools import islice
 # from torch.nn.attention.flex_attention import flex_attention, and_masks, create_block_mask
 from torch.nn.functional import scaled_dot_product_attention
-
-
 # print(f"GPU: {torch.cuda.is_available()}")
 
-# tokenizer = get_tokenizer(
-#     "spacy",
-#     language="pl_core_news_sm"
-# )
-
-# df = pandas.read_csv( "./out11.csv" )
-# for line in df["lead"][:10]:
-#     line: str = line.strip()
-#     print(tokenizer( line ))
-
 tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base")
-
-# special_tokens = {
-#     "bos_token": "[START]",
-#     "eos_token": "[END]",
-#     "pad_token": "[PAD]"
-# }
-
-# tokenizer.add_special_tokens(special_tokens)
-
-# tokenizer.pad_token = tokenizer.eos_token
-# print( tokenizer.pad_token_id, tokenizer.eos_token_id )
-
-# class TextDataset(IterableDataset):
-
-#     def __init__(self, filename, block_size=128):
-#         self.filename = filename
-#         # self.block_size = block_size
-#         self.df = pandas.read_csv(self.filename)
-#         self.tokens = [ tokenizer(t, add_special_tokens=True)["input_ids"]
-#                         for t in self.df["lead"].dropna()[:10] ]
-        
-#         # self.tokens =tokens
-
-#         for idx in range(len(self.tokens)):
-#             tokens = self.tokens[idx]
-            
-#             l = len( tokens )
-#             tokens = tensor(tokens, dtype=long)
-#             tokens = torch.cat( [ tokens, torch.full( (block_size - l,), 2 ) ] )
-
-#             self.tokens[idx]=tokens
-
-#     def __len__( self ):
-#         return len( self.tokens )
-
-#     # def __getitem__(self, idx):
-
-#     #     tokens = self.tokens[idx]
-        
-#     #     # l = len( tokens )
-#     #     # tokens = tensor(tokens, dtype=long)
-#     #     # tokens = torch.cat( [ tokens, torch.full( (max_seq_length - l,), 2 ) ] )
-
-#     #     # print( tokens.shape )
-
-#     #     return tokens
-
-#     def parse_file( self ):
-#         with open( self.filename, encoding="utf-8" ) as f:
-#             reader = csv.DictReader( f )
-
-#             for row in islice(reader, 10):
-#                 text = row["lead"]
-
-#                 yield text
-
-
-#     def __iter__(self):
-
-#         for line in self.parse_file():
-
-#             text = str(line).strip()
-
-#             tokens = tokenizer(
-#                 text,
-#                 add_special_tokens=True
-#             )["input_ids"]
-
-#             l = len( tokens )
-#             tokens = tensor(tokens, dtype=long)
-#             tokens = torch.cat( [ tokens, torch.full( (max_seq_length - l,), 2 ) ] )
-
-#             # print( tokens.shape )
-
-#             yield tokens
 
 class TextDataset(Dataset):
 
@@ -122,15 +35,38 @@ class TextDataset(Dataset):
 
         l = len( tokens )
 
-        tokens = tensor( tokens )
+        tokens = torch.tensor( tokens )
         tokens = torch.cat( [ tokens, torch.full( (self.block_size - l,), tokenizer.pad_token_id ) ] )
 
         return tokens
 
 # df = pandas.read_csv( "out11.csv" )
 
-# tokens = [ tokenizer(t, add_special_tokens=True)["input_ids"]
-#     for t in df["lead"].dropna()[:10] ]
+# sentences = df["lead"].dropna()[:3]
+# # print( sentences.to_list() )
+# tokens = tokenizer(sentences.to_list(), return_attention_mask=False, add_special_tokens=False)["input_ids"]
+
+# tokens = [ t for s in tokens for t in s + [tokenizer.eos_token_id]  ]
+
+# tokens = torch.tensor(tokens)
+
+# def get_attention_mask_for_packed_sequence(x, token_id, eos: bool = True):
+#     # store sequence length in variable for easier readability
+#     T = tokens.size(0)
+#     # get indices of all EOS tokens
+#     eos_indices = (tokens == tokenizer.eos_token_id).nonzero().squeeze()
+#     # from indices, get length of each sequence
+#     reps = torch.cat([eos_indices[[0]]+1, eos_indices[1:] - eos_indices[:-1]])
+#     # repeat each eos index n times along dimension 1 (n is the number of tokens in the sequence)
+#     repeated_idx = torch.repeat_interleave(eos_indices, reps).view(1,-1).expand(T, -1)
+#     # create tensor with all indices from 0 to T-1 repeated T times along dimesion 1
+#     mask_indices = torch.arange(T).view(-1,1).expand(-1, T)
+#     # create causal mask and additionally mask out all tokens from preceeding sequences
+#     mask = torch.ones(T, T, dtype=torch.bool).tril().expand(-1, -1)
+#     mask.masked_fill_(mask_indices > repeated_idx, False)
+#     return mask
+
+# print(get_attention_mask_for_packed_sequence(tokens, tokenizer.eos_token_id).shape)
 
 max_seq_length = 64
 
@@ -162,14 +98,14 @@ class InputEmbeddings(Module):
 class PositionalEncoding(Module):
     def __init__(self, d_model: int, max_seq_length: int):
         super().__init__()
-        pe = zeros( size=(max_seq_length, d_model) )
-        pos = arange( start=0, 
+        pe = torch.zeros( size=(max_seq_length, d_model) )
+        pos = torch.arange( start=0, 
                             end=max_seq_length, 
                             dtype=float ).reshape( shape=(max_seq_length, 1) )
-        div_term = exp(-arange(0, d_model, 2).float() * log(10000.0) / d_model)
+        div_term = torch.exp(-torch.arange(0, d_model, 2).float() * log(10000.0) / d_model)
         
-        pe[:, 0::2] = sin(pos * div_term)
-        pe[:, 1::2] = cos(pos * div_term)
+        pe[:, 0::2] = torch.sin(pos * div_term)
+        pe[:, 1::2] = torch.cos(pos * div_term)
         
         self.register_buffer('pe', pe.unsqueeze(0))
 
@@ -210,8 +146,8 @@ def causal(b, h, q_idx, kv_idx):
 class CausalSelfAttention( Module ):
     def __init__( self, num_heads, d_model, seq_len, dropout_rate=0.1 ):
         super().__init__()
-        self.mha = MultiheadAttention( num_heads=num_heads, 
-                                       embed_dim=d_model, batch_first=True )
+        # self.mha = MultiheadAttention( num_heads=num_heads, 
+        #                                embed_dim=d_model, batch_first=True )
         self.norm = LayerNorm( d_model )
         self.dropout=Dropout( dropout_rate )
         self.num_heads = num_heads
@@ -365,14 +301,14 @@ class GPT( Module ):
 
     def forward( self, x ):
         
-        padding_mask = (x == tokenizer.pad_token_id)
+        # padding_mask = (x == tokenizer.pad_token_id)
         # print( padding_mask.shape )
 
         x = self.embedding( x )
         x = self.positional_encoding( x )
         
         for layer in self.layers:
-            x = layer( x, padding_mask )
+            x = layer( x )
 
         x = self.linear( x )
 
@@ -407,14 +343,14 @@ def generate( context ):
     for i in range( 128 ):
         out = gpt( context[ :, -max_seq_length: ] )
         out = out[:, -1, :] 
-        out = softmax( input=out, dim=-1 )
-        out = argmax(out, -1)
+        out = torch.softmax( input=out, dim=-1 )
+        out = torch.argmax(out, -1)
         # out = torch.multinomial(out, num_samples=1)
         out = out.unsqueeze(1)
 
         # print( out )
 
-        context = cat([context, out], dim=1)
+        context = torch.cat([context, out], dim=1)
 
         if out == tokenizer.eos_token_id:
             break
@@ -429,58 +365,113 @@ def generate( context ):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gpt = gpt.to(device)
 
-optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
+# optimizer = torch.optim.AdamW(gpt.parameters(), lr=3e-4)
+# optimizer = torch.optim.SGD(gpt.parameters(), lr=1e-3)
+
+# optimizer = torch.optim.AdamW(
+#     gpt.parameters(),
+#     lr=3e-4,
+#     fused=True
+# )
+
+optimizer = Adafactor( gpt.parameters() )
 
 crossentropy = torch.nn.CrossEntropyLoss( ignore_index=tokenizer.pad_token_id )
 
-accumulation_steps = 3
-num_epochs = 100
+# accumulation_steps = 3
+# num_epochs = 100
 
-for epoch in range( num_epochs ):
+# for epoch in range( num_epochs ):
+
+running_loss = 0.
+last_loss = 0.
+# print( f"epoch {epoch}", flush=True )
+
+# optimizer.zero_grad()
+
+scaler = torch.amp.GradScaler( device="cuda" )
+
+def run_epoch( epoch ):
 
     gpt.train()
 
-    running_loss = 0.
-    last_loss = 0.
-    print( f"epoch {epoch}", flush=True )
-    
-    optimizer.zero_grad()
+    total_loss = 0.
+    num_batches = len(dataset) // 4
 
     for i, data in enumerate(loader):
-        
-        x = data
-                
-        # print( x )
+        optimizer.zero_grad(set_to_none=True)
 
-        # x = x.to(device)
-        # mask = mask.to(device)
-        
-        train = x[:, :-1]
-        test = x[:, 1:]
+        train = data[:, :-1]
+        test = data[:, 1:]
 
         train, test = train.to(device), test.to(device)
 
-        optimizer.zero_grad( set_to_none=True )
-        
-        # print( train[0], test[0] )
+        with torch.autocast("cuda", dtype=torch.float16):
+            logits = gpt(train)
 
-        logits = gpt( train )
+            logits = logits.reshape(-1, vocab_size)
+            test = test.reshape( -1 )
 
-        logits = logits.reshape(-1, vocab_size)
-        test = test.reshape( -1 )
+            loss = crossentropy(logits, test)
 
-        loss = crossentropy( logits, test )
-        loss.backward()
-        
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-        # print( loss.item() )
+        # if i % 16 == 0:
+        #     scaler.step(optimizer)
+        #     optimizer.zero_grad(set_to_none=True)
+        #     scaler.update()
 
-        if (i + 1) % accumulation_steps == 0:
-            optimizer.step()
-            optimizer.zero_grad()
+        total_loss += loss.item()
+    print( f"epoch {epoch} avg loss: { total_loss / num_batches }" )
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
+for epoch in range( 100 ):
+    run_epoch( epoch )
+
+# gpt.train( mode=True )
+
+tokens = tokenizer.encode("W niedzielę Komenda Miejska Policji")
+context = torch.tensor( [tokens] )
+context = context.to( device )
+
+print( generate( context ) )
+
+# for i, data in enumerate(loader):
+    
+#     x = data
+            
+#     # print( x )
+
+#     # x = x.to(device)
+#     # mask = mask.to(device)
+    
+#     train = x[:, :-1]
+#     test = x[:, 1:]
+
+#     train, test = train.to(device), test.to(device)
+
+#     optimizer.zero_grad( set_to_none=True )
+    
+#     # print( train[0], test[0] )
+
+#     logits = gpt( train )
+
+#     logits = logits.reshape(-1, vocab_size)
+#     test = test.reshape( -1 )
+
+#     loss = crossentropy( logits, test )
+    # loss.backward()
+    
+    # optimizer.step()
+
+#     # print( loss.item() )
+
+# #     if (i + 1) % accumulation_steps == 0:
+# #         optimizer.step()
+# #         optimizer.zero_grad()
+
+    # print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
 
         # if i % 4 == 1:
         #     running_loss += loss.item()
@@ -494,10 +485,10 @@ for epoch in range( num_epochs ):
             
         # break
 
-tokens = tokenizer.encode("W niedzielę Komenda Miejska Policji")
-context = tensor([tokens], dtype=long)
-context = context.to( device )
+# tokens = tokenizer.encode("W niedzielę Komenda Miejska Policji")
+# context = torch.tensor( [tokens] )
+# context = context.to( device )
 
-print( generate( context ) )
+# print( generate( context ) )
 
 # torch.save(gpt.state_dict(), "gpt.pt")
