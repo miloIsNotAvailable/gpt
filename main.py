@@ -7,7 +7,8 @@ from torch.utils.data import IterableDataset, DataLoader, Dataset
 from transformers import AutoTokenizer
 import csv
 from itertools import islice
-# from torch.nn.attention import and_masks, flex_attention
+# from torch.nn.attention.flex_attention import flex_attention, and_masks, create_block_mask
+from torch.nn.functional import scaled_dot_product_attention
 
 
 # print(f"GPU: {torch.cuda.is_available()}")
@@ -121,7 +122,7 @@ class TextDataset(Dataset):
 
         l = len( tokens )
 
-        tokens = tensor(tokens, dtype=long)
+        tokens = tensor( tokens )
         tokens = torch.cat( [ tokens, torch.full( (self.block_size - l,), tokenizer.pad_token_id ) ] )
 
         return tokens
@@ -203,6 +204,8 @@ d_model = 256
     
 #     def forward( self, x ):
 
+def causal(b, h, q_idx, kv_idx):
+    return q_idx >= kv_idx
 
 class CausalSelfAttention( Module ):
     def __init__( self, num_heads, d_model, seq_len, dropout_rate=0.1 ):
@@ -211,48 +214,82 @@ class CausalSelfAttention( Module ):
                                        embed_dim=d_model, batch_first=True )
         self.norm = LayerNorm( d_model )
         self.dropout=Dropout( dropout_rate )
+        self.num_heads = num_heads
+        self.embed_dim = d_model
+        self.head_dim = self.embed_dim // self.num_heads
 
-    def forward( self, x ):
-
-        T = x.size(1)
-
-        attn_mask = triu(
-            full((T, T), float('-inf'), device=x.device),
-            diagonal=1
-        )
-
-        out, _ = self.mha(  query=x, 
-                            key=x, 
-                            value=x, 
-                            attn_mask=attn_mask,
-                            is_causal=True,
-                            need_weights=False )
+        # self.query = Linear(self.embed_dim, self.embed_dim)
+        # self.key = Linear(self.embed_dim, self.embed_dim)
+        # self.value = Linear(self.embed_dim, self.embed_dim)
         
+        self.qkv = Linear( self.embed_dim, 3 * self.embed_dim )
+
+        self.fc_out = Linear(self.embed_dim, self.embed_dim)
+
+    def forward( self, x, padding_mask=None ):
+
+        # B, S, D = x.shape
+
+        # # T = x.size(1)
+
+        # attn_mask = triu(
+        #     torch.ones((S, S), device=x.device, dtype=torch.bool),
+        #     diagonal=1
+        # )
+
+
+        # # print( padding_mask )
+
+        # out, _ = self.mha(  query=x, 
+        #                     key=x, 
+        #                     value=x, 
+        #                     attn_mask=attn_mask,
+        #                     key_padding_mask=padding_mask,
+        #                     is_causal=True,
+        #                     need_weights=False )
+        
+
+        B, S, D = x.shape
+
+        # Q = self.query( x )
+        # K = self.key( x )
+        # V = self.value( x )
+
+        # qkv = self.qkv( x )
+        # Q, K, V = qkv.chunk( 3, dim=-1 )
+
+        # Q = Q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        # K = K.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        # V = V.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # qkv = self.qkv( x.reshape( B, self.num_heads, S, self.head_dim ) )
+        # Q, K, V = qkv.chunk( 3, dim=-1 )
+
+        qkv = self.qkv( x )
+
+        qkv = qkv.view( B, S, 3, self.num_heads, self.head_dim )
+        Q, K, V = qkv.unbind( dim=2 )
+
+        Q = Q.transpose( 1, 2 )
+        K = K.transpose( 1, 2 )
+        V = V.transpose( 1, 2 )
+
+        out = scaled_dot_product_attention( query=Q, 
+                                            key=K, 
+                                            value=V, 
+                                            is_causal=True )
+                
+        out = out.transpose(1, 2)
+        out = out.reshape(B, S, D)
+
+        out = self.fc_out( out )
+
+        # print( out1.shape, out.shape )
+        # print( out1, out )
+
         out = x + out
         out = self.norm( out )
 
-        out = self.dropout( out )
-
-        return out
-
-class CrossSelfAttention( Module ):
-    def __init__( self, num_heads, d_model, seq_len, dropout_rate=.1 ):
-        super().__init__()
-        self.mha = MultiheadAttention( num_heads=num_heads, 
-                                       embed_dim=d_model )
-        self.norm = LayerNorm( d_model )
-
-        self.dropout=Dropout( dropout_rate )
-
-    def forward( self, x, context ):
-
-
-        out, attn_weights = self.mha( query=x, 
-                                      key=context, 
-                                    value=context )
-        
-        out = x + out
-        out = self.norm( out )
         out = self.dropout( out )
 
         return out
@@ -291,9 +328,9 @@ class Decoder( Module ):
         self.norm1 = LayerNorm( d_model )
         # self.norm2 = LayerNorm( d_model )
 
-    def forward( self, x ):
+    def forward( self, x, padding_mask=None ):
 
-        out = self.causal( x )
+        out = self.causal( x, padding_mask )
 
         # out = self.cross( out, out )
 
@@ -328,11 +365,14 @@ class GPT( Module ):
 
     def forward( self, x ):
         
+        padding_mask = (x == tokenizer.pad_token_id)
+        # print( padding_mask.shape )
+
         x = self.embedding( x )
         x = self.positional_encoding( x )
         
         for layer in self.layers:
-            x = layer( x )
+            x = layer( x, padding_mask )
 
         x = self.linear( x )
 
