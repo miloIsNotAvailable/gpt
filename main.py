@@ -1,17 +1,101 @@
 import torch
 # from torch import zeros, arange, exp, sin, cos, triu, tensor, full, __version__, long, softmax, argmax, cat
-from torch.nn import Module, Embedding, LayerNorm, Linear, ReLU, Dropout, ModuleList
+from torch.nn import Module, Embedding, LayerNorm, Linear, ReLU, Dropout, ModuleList, GELU
 from math import sqrt, log
 import pandas
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 from transformers import AutoTokenizer, Adafactor
 # import csv
 # from itertools import islice
 # from torch.nn.attention.flex_attention import flex_attention, and_masks, create_block_mask
 from torch.nn.functional import scaled_dot_product_attention
 # print(f"GPU: {torch.cuda.is_available()}")
+import time
 
 tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base")
+
+def block_causal_mask(x, eos_token_id):
+
+    device = x.device
+
+    B, T = x.shape
+
+    eos_idx = (x.view(-1) == eos_token_id).nonzero(as_tuple=True)[0] + True
+
+    eos_idx_expanded = torch.cat([
+        eos_idx,
+        torch.arange(0, B*T+1, T, device=device)
+    ]).unique().sort()[0]
+
+    normalized_idx = eos_idx_expanded - (eos_idx_expanded // T) * T
+
+    normalized_idx = torch.where(
+        normalized_idx == 0,
+        torch.tensor(T, device=device),
+        normalized_idx
+    )
+
+    reps = normalized_idx[1:] - normalized_idx[:-1]
+
+    reps = torch.where(
+        reps < 1,
+        normalized_idx[1:],
+        reps
+    )
+
+    repeated_idx = torch.repeat_interleave(
+        normalized_idx[1:],
+        reps
+    ).view(B,1,T).expand(-1,T,-1)
+
+    mask_indices = torch.arange(
+        T,
+        device=device
+    ).view(1,-1,1).expand(B,-1,T)
+
+    mask = torch.ones(
+        T,
+        T,
+        dtype=torch.bool,
+        device=device
+    ).tril().expand(B,-1,-1)
+
+    mask = mask.masked_fill(mask_indices >= repeated_idx, False)
+
+    return mask
+
+class PackedDataset( IterableDataset ):
+    def __init__(self, filename, block_size=64):
+
+        self.df = pandas.read_csv(filename)
+        self.block_size = block_size
+        self.word_set = set()
+
+    def __len__( self ):
+        # return len( self.df )
+        return 50
+
+    def stream_df_tokens( self ):
+        for i in range( len( self ) ):
+            lead = self.df.iloc[i, 2]  
+            tokenized = tokenizer(lead, add_special_tokens=False)["input_ids"]
+
+            tokenized = tokenized + [ tokenizer.eos_token_id ]
+
+            for t in tokenized:
+                self.word_set.add( t )
+                yield t
+
+
+    def __iter__( self ):
+        buffer = []
+        for token in self.stream_df_tokens():
+            
+            buffer += [ token ] 
+            if len( buffer ) == self.block_size: 
+                yield torch.tensor( buffer )
+                buffer = []
+
 
 class TextDataset(Dataset):
 
@@ -22,14 +106,14 @@ class TextDataset(Dataset):
         self.block_size = block_size
 
     def __len__( self ):
-        return 50
+        return 1000
 
     def __getitem__( self, idx ):
 
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        lead = self.df.iloc[idx % 50, 2] 
+        lead = self.df.iloc[idx % 1000, 2] 
 
         tokens = tokenizer(lead, add_special_tokens=True, max_length=self.block_size)["input_ids"]
 
@@ -40,7 +124,6 @@ class TextDataset(Dataset):
 
         return tokens
 
-# df = pandas.read_csv( "out11.csv" )
 
 # sentences = df["lead"].dropna()[:3]
 # # print( sentences.to_list() )
@@ -50,37 +133,48 @@ class TextDataset(Dataset):
 
 # tokens = torch.tensor(tokens)
 
-# def get_attention_mask_for_packed_sequence(x, token_id, eos: bool = True):
-#     # store sequence length in variable for easier readability
-#     T = tokens.size(0)
-#     # get indices of all EOS tokens
-#     eos_indices = (tokens == tokenizer.eos_token_id).nonzero().squeeze()
-#     # from indices, get length of each sequence
-#     reps = torch.cat([eos_indices[[0]]+1, eos_indices[1:] - eos_indices[:-1]])
-#     # repeat each eos index n times along dimension 1 (n is the number of tokens in the sequence)
-#     repeated_idx = torch.repeat_interleave(eos_indices, reps).view(1,-1).expand(T, -1)
-#     # create tensor with all indices from 0 to T-1 repeated T times along dimesion 1
-#     mask_indices = torch.arange(T).view(-1,1).expand(-1, T)
-#     # create causal mask and additionally mask out all tokens from preceeding sequences
-#     mask = torch.ones(T, T, dtype=torch.bool).tril().expand(-1, -1)
-#     mask.masked_fill_(mask_indices > repeated_idx, False)
-#     return mask
-
 # print(get_attention_mask_for_packed_sequence(tokens, tokenizer.eos_token_id).shape)
 
 max_seq_length = 64
 
-dataset = TextDataset( filename="./out11.csv", block_size=max_seq_length )
+# dataset = TextDataset( filename="./out11.csv", block_size=max_seq_length )
+dataset = PackedDataset( filename="./out11.csv", block_size=max_seq_length )
+
+df = pandas.read_csv( "out11.csv" )
+word_set = set()
+# count = 0
+
+for i in range( len( df ) ):
+    lead = df.iloc[i, 2]  
+    tokenized = tokenizer(lead, add_special_tokens=False)["input_ids"]
+
+    tokenized = tokenized + [ tokenizer.eos_token_id ]
+
+    for t in tokenized:
+        word_set.add( t )
+        # count += 1
+
+print( f"unqiue tokens in ds: { len( word_set ) }" )
 
 loader = DataLoader(
     dataset,
     batch_size=4,
-    shuffle=True
+    # shuffle=True
 )
 
 for i, batch in enumerate(loader):
     # input_ids = batch
-    print(tokenizer.decode( batch[0] ), batch.shape)
+    for j in range( 3 ):
+        print(tokenizer.decode( batch[j] ))
+    
+    break
+
+for i, batch in enumerate(loader):
+    # input_ids = batch
+    print( block_causal_mask(batch, eos_token_id=tokenizer.eos_token_id) )
+    # for j in range( 3 ):
+        # eos_token_indices = (batch[j] == tokenizer.eos_token_id).nonzero()
+        # print( block_causal_mask(batch[j], eos_token_id=tokenizer.eos_token_id) )
     if i == 3:
         break
 
@@ -114,34 +208,6 @@ class PositionalEncoding(Module):
 
 vocab_size = tokenizer.vocab_size
 d_model = 256
-
-# embedding_layer = InputEmbeddings(vocab_size, d_model)
-# input_tokens, mask = next(iter(loader))
-# # print( f"{dataset.tokenizer.decode( input_tokens )}: {input_tokens}" )
-# embedded_tokens = embedding_layer(input_tokens)
-
-# pos_encoding_layer = PositionalEncoding(d_model, max_seq_length)
-# position_encoded_tokens = pos_encoding_layer(embedded_tokens)
-
-# SLIDING_WINDOW = 1024
-# def sliding_window_causal(b, h, q_idx, kv_idx):
-#     causal_mask = q_idx >= kv_idx
-#     window_mask = q_idx - kv_idx <= SLIDING_WINDOW 
-#     return causal_mask & window_mask
-
-# def sliding_window(b, h, q_idx, kv_idx):
-#     return q_idx - kv_idx <= SLIDING_WINDOW
-
-# class FlexAttention( Module ):
-#     def __init__( self, q, k, v ):
-#         self.q = q
-#         self.k = k
-#         self.v = v
-    
-#     def forward( self, x ):
-
-def causal(b, h, q_idx, kv_idx):
-    return q_idx >= kv_idx
 
 class CausalSelfAttention( Module ):
     def __init__( self, num_heads, d_model, seq_len, dropout_rate=0.1 ):
@@ -210,10 +276,27 @@ class CausalSelfAttention( Module ):
         K = K.transpose( 1, 2 )
         V = V.transpose( 1, 2 )
 
+        # print( x.shape )
+
+        # mask = block_causal_mask(x, eos_token_id=tokenizer.eos_token_id)
+        # mask = mask.unsqueeze(1)
+        # mask = mask.expand(-1, 4, -1, -1)
+
+        # with torch.nn.attention.sdpa_kernel( [
+        #     # torch.backends.cuda.enable_flash_sdp(),
+        #     torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+        #     torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+        # ] ):
+
+        # padding_mask = padding_mask.unsqueeze(1)
+        # print( x.shape, padding_mask.shape )
+        padding_mask = padding_mask[:, None, :, :]
+
         out = scaled_dot_product_attention( query=Q, 
                                             key=K, 
                                             value=V, 
-                                            is_causal=True )
+                                            attn_mask=padding_mask,
+                                            is_causal=False )
                 
         out = out.transpose(1, 2)
         out = out.reshape(B, S, D)
@@ -223,8 +306,8 @@ class CausalSelfAttention( Module ):
         # print( out1.shape, out.shape )
         # print( out1, out )
 
-        out = x + out
-        out = self.norm( out )
+        # out = x + out
+        # out = self.norm( out )
 
         out = self.dropout( out )
 
@@ -235,7 +318,7 @@ class FeedForward(Module):
         super().__init__()
         self.fc1 = Linear(d_model, d_ff)
         self.fc2 = Linear(d_ff, d_model)
-        self.relu = ReLU()
+        self.relu = GELU()
         self.dropout = Dropout( dropout_rate )
     def forward(self, x):
         return self.dropout(self.fc2(self.relu(self.fc1(x))))
@@ -262,21 +345,20 @@ class Decoder( Module ):
         self.feed = FeedForward( d_model=d_model, d_ff=d_ff )
         self.dropout = Dropout( dropout_rate ) 
         self.norm1 = LayerNorm( d_model )
-        # self.norm2 = LayerNorm( d_model )
+        self.norm2 = LayerNorm( d_model )
 
     def forward( self, x, padding_mask=None ):
 
-        out = self.causal( x, padding_mask )
+        # out = self.causal( x, padding_mask )
 
-        # out = self.cross( out, out )
-
-        # out = self.norm1( out )
-        out = self.feed( out )
-
-        x = x + out
-        x = self.norm1( x )
+        # x = x + self.feed( out )
+        # x = self.norm1( x )
         x = self.dropout( x )  
         
+        x = x + self.causal( self.norm1(x), padding_mask )
+        x = x + self.feed(self.norm2(x))
+        # x = self.dropout(x)
+
         return x
 
 
@@ -299,17 +381,26 @@ class GPT( Module ):
 
         self.linear = Linear( d_model, vocab_size )
 
+        self.dropout = Dropout( .1 )
+
+        self.norm = LayerNorm( d_model )
+
     def forward( self, x ):
         
         # padding_mask = (x == tokenizer.pad_token_id)
         # print( padding_mask.shape )
 
+        mask = block_causal_mask(x, eos_token_id=tokenizer.eos_token_id)
+
         x = self.embedding( x )
         x = self.positional_encoding( x )
         
-        for layer in self.layers:
-            x = layer( x )
+        x = self.dropout( x )
 
+        for layer in self.layers:
+            x = layer( x, mask )
+
+        x = self.norm( x )
         x = self.linear( x )
 
         return x
@@ -327,7 +418,7 @@ class GPT( Module ):
 
 # decoder( input_tokens )
 # input_tokens, mask = next(iter(loader))
-gpt = GPT( num_heads=1,
+gpt = GPT( num_heads=4,
            d_model=d_model,
            seq_len=max_seq_length,
            vocab_size=vocab_size,
@@ -338,29 +429,31 @@ gpt = GPT( num_heads=1,
 # x = input_tokens[:, :-1]
 # test = input_tokens[:, 1:]
 
-def generate( context ):
+def generate(context, temperature=0.8, top_k=40):
 
-    for i in range( 128 ):
-        out = gpt( context[ :, -max_seq_length: ] )
-        out = out[:, -1, :] 
-        out = torch.softmax( input=out, dim=-1 )
-        out = torch.argmax(out, -1)
-        # out = torch.multinomial(out, num_samples=1)
-        out = out.unsqueeze(1)
+    for _ in range(512):
 
-        # print( out )
+        logits = gpt(context[:, -max_seq_length:])
+
+        logits = logits[:, -1, :]
+
+        values, indices = torch.topk(logits, top_k)
+
+        probs = torch.softmax(values / temperature, dim=-1)
+
+        sampled = torch.multinomial(probs, 1)
+
+        out = indices.gather(-1, sampled)
 
         context = torch.cat([context, out], dim=1)
 
-        if out == tokenizer.eos_token_id:
+        if out.item() == tokenizer.eos_token_id:
             break
 
-    context = context[ 0 ]
-    context = context[ context != 2 ]
-    return tokenizer.decode( context )
+    return tokenizer.decode(context[0])
 
 
-# gpt.load_state_dict(torch.load("gpt.pt"))
+# gpt.load_state_dict(torch.load("gpt_10k_104.pt"))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gpt = gpt.to(device)
@@ -374,7 +467,11 @@ gpt = gpt.to(device)
 #     fused=True
 # )
 
-optimizer = Adafactor( gpt.parameters() )
+optimizer = Adafactor(  gpt.parameters(),
+                        lr=1e-3,
+                        scale_parameter=True,
+                        relative_step=False,
+                        warmup_init=False )
 
 crossentropy = torch.nn.CrossEntropyLoss( ignore_index=tokenizer.pad_token_id )
 
@@ -397,6 +494,7 @@ def run_epoch( epoch ):
 
     total_loss = 0.
     num_batches = len(dataset) // 4
+    start = time.time()
 
     for i, data in enumerate(loader):
         optimizer.zero_grad(set_to_none=True)
@@ -424,18 +522,29 @@ def run_epoch( epoch ):
         #     scaler.update()
 
         total_loss += loss.item()
-    print( f"epoch {epoch} avg loss: { total_loss / num_batches }" )
+    print( f"epoch {epoch} avg loss: { total_loss / num_batches } time: {time.time() - start}" )
 
-for epoch in range( 100 ):
+for epoch in range( 25 ):
     run_epoch( epoch )
 
-# gpt.train( mode=True )
+# gpt.train( mode=False )
 
-tokens = tokenizer.encode("W niedzielę Komenda Miejska Policji")
-context = torch.tensor( [tokens] )
-context = context.to( device )
+proompts = [ "Trwają poszkiwania", 
+             "W Niedziele", 
+             "Zaginął", 
+             "Zaginiona",
+             "Zaginęła",
+             "W niedzielę Komenda Miejska Policji",
+             "Zobacz" 
+             ]
 
-print( generate( context ) )
+
+for i in proompts:
+    tokens = tokenizer.encode(i, add_special_tokens=False)
+    # tokens = tokens + [tokenizer.eos_token_id]
+    context = torch.tensor( [tokens] )
+    context = context.to( device )
+    print( generate( context ) )
 
 # for i, data in enumerate(loader):
     
